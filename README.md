@@ -1,6 +1,5 @@
 # coms6998-HPML-final-project: Analyzing and Optimizing the Performance of Fine Tuning Stable Diﬀusion Image Generating model
-- Team Members
-- Robin Hung-Ching Liu (hl3818)
+- Team Members: Robin Hung-Ching Liu (hl3818)
 ## TODO: The code is still in the other repository; will migrate it here ASAP.
 ## Goal/Objective
 1. Understand the underlying mechanism and architecture of the Stable Diﬀusion image
