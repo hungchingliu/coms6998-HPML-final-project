@@ -1,0 +1,3 @@
+[submodule "SimpleTuner"]
+	path = SimpleTuner
+	url = git@github.com:bghira/SimpleTuner.git
