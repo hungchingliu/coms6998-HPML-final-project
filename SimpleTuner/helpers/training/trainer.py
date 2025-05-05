@@ -214,34 +214,6 @@ class Trainer:
             self.init_seed()
             self.init_huggingface_hub()
 
-            # Initialize profiler if enabled  
-            profiler = None  
-            if self.config.enable_profiler:  
-                activities = []  
-                if "cpu" in self.config.profiler_activities:  
-                    activities.append(ProfilerActivity.CPU)  
-                if "cuda" in self.config.profiler_activities and torch.cuda.is_available():  
-                    activities.append(ProfilerActivity.CUDA)  
-                    
-                os.makedirs(self.config.profiler_output_dir, exist_ok=True)  
-                
-                profiler = torch.profiler.profile(  
-                    activities=activities,  
-                    schedule=torch.profiler.schedule(  
-                        wait=self.config.profiler_schedule_wait,  
-                        warmup=self.config.profiler_schedule_warmup,  
-                        active=self.config.profiler_schedule_active,  
-                        repeat=self.config.profiler_schedule_repeat  
-                    ),  
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler(  
-                        os.path.join(self.config.profiler_output_dir, "initialization")    
-                    ),  
-                    record_shapes=True,  
-                    profile_memory=True,  
-                    with_stack=True  
-                ) 
-                profiler.start()  
-
             # Core initialization steps with signal checks after each step
             self._initialize_components_with_signal_check(
                 [
