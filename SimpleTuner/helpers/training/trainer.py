@@ -41,6 +41,7 @@ from helpers.training.min_snr_gamma import compute_snr
 from helpers.training.peft_init import init_lokr_network_with_perturbed_normal
 from accelerate.logging import get_logger
 from helpers.models.all import model_families
+from torch.profiler import profile, record_function, ProfilerActivity  
 
 logger = get_logger(
     "SimpleTuner", log_level=os.environ.get("SIMPLETUNER_LOG_LEVEL", "INFO")
@@ -212,6 +213,34 @@ class Trainer:
             self.init_noise_schedule()
             self.init_seed()
             self.init_huggingface_hub()
+
+            # Initialize profiler if enabled  
+            profiler = None  
+            if self.config.enable_profiler:  
+                activities = []  
+                if "cpu" in self.config.profiler_activities:  
+                    activities.append(ProfilerActivity.CPU)  
+                if "cuda" in self.config.profiler_activities and torch.cuda.is_available():  
+                    activities.append(ProfilerActivity.CUDA)  
+                    
+                os.makedirs(self.config.profiler_output_dir, exist_ok=True)  
+                
+                profiler = torch.profiler.profile(  
+                    activities=activities,  
+                    schedule=torch.profiler.schedule(  
+                        wait=self.config.profiler_schedule_wait,  
+                        warmup=self.config.profiler_schedule_warmup,  
+                        active=self.config.profiler_schedule_active,  
+                        repeat=self.config.profiler_schedule_repeat  
+                    ),  
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(  
+                        os.path.join(self.config.profiler_output_dir, "initialization")    
+                    ),  
+                    record_shapes=True,  
+                    profile_memory=True,  
+                    with_stack=True  
+                ) 
+                profiler.start()  
 
             # Core initialization steps with signal checks after each step
             self._initialize_components_with_signal_check(
@@ -1894,6 +1923,37 @@ class Trainer:
         )
         self.accelerator.wait_for_everyone()
 
+        # Initialize profiler if enabled  
+        profiler = None  
+        if self.config.enable_profiler:  
+            activities = []  
+            if "cpu" in self.config.profiler_activities:  
+                activities.append(ProfilerActivity.CPU)  
+            if "cuda" in self.config.profiler_activities and torch.cuda.is_available():  
+                activities.append(ProfilerActivity.CUDA)  
+                
+            os.makedirs(self.config.profiler_output_dir, exist_ok=True)  
+            
+            profiler = torch.profiler.profile(  
+                activities=activities,  
+                schedule=torch.profiler.schedule(  
+                    wait=self.config.profiler_schedule_wait,  
+                    warmup=self.config.profiler_schedule_warmup,  
+                    active=self.config.profiler_schedule_active,  
+                    repeat=self.config.profiler_schedule_repeat  
+                ),  
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(  
+                    self.config.profiler_output_dir  
+                ),  
+                record_shapes=True,  
+                profile_memory=True,  
+                with_stack=True  
+            )  
+      
+        # Start the profiler if enabled  
+        if profiler:  
+            profiler.start()
+
         # Some values that are required to be initialised later.
         step = self.state["global_step"]
         training_luminance_values = []
@@ -1964,454 +2024,460 @@ class Trainer:
                 iterator_fn = self.bf.next_response
 
             while True:
-                self._exit_on_signal()
-                step += 1
-                prepared_batch = self.prepare_batch(iterator_fn(step, *iterator_args))
-                training_logger.debug(f"Iterator: {iterator_fn}")
-                if self.config.lr_scheduler == "cosine_with_restarts":
-                    self.extra_lr_scheduler_kwargs["step"] = self.state["global_step"]
+                with record_function("training_step"):
+                    self._exit_on_signal()
+                    step += 1
+                    prepared_batch = self.prepare_batch(iterator_fn(step, *iterator_args))
+                    training_logger.debug(f"Iterator: {iterator_fn}")
+                    if self.config.lr_scheduler == "cosine_with_restarts":
+                        self.extra_lr_scheduler_kwargs["step"] = self.state["global_step"]
 
-                if self.accelerator.is_main_process:
-                    progress_bar.set_description(
-                        f"Epoch {self.state['current_epoch']}/{self.config.num_train_epochs}, Steps"
-                    )
-
-                # If we receive a False from the enumerator, we know we reached the next epoch.
-                if prepared_batch is False:
-                    logger.debug(f"Reached the end of epoch {epoch}")
-                    break
-
-                if prepared_batch is None:
-                    import traceback
-
-                    raise ValueError(
-                        f"Received a None batch, which is not a good thing. Traceback: {traceback.format_exc()}"
-                    )
-
-                # Add the current batch of training data's avg luminance to a list.
-                if "batch_luminance" in prepared_batch:
-                    training_luminance_values.append(prepared_batch["batch_luminance"])
-
-                with self.accelerator.accumulate(training_models):
-                    bsz = prepared_batch["latents"].shape[0]
-                    training_logger.debug("Sending latent batch to GPU.")
-
-                    if int(bsz) != int(self.config.train_batch_size):
-                        logger.error(
-                            f"Received {bsz} latents, but expected {self.config.train_batch_size}. Processing short batch."
-                        )
-                    training_logger.debug(f"Working on batch size: {bsz}")
-                    # Prepare the data for the scatter plot
-                    for timestep in prepared_batch["timesteps"].tolist():
-                        self.timesteps_buffer.append(
-                            (self.state["global_step"], timestep)
-                        )
-
-                    if "encoder_hidden_states" in prepared_batch:
-                        encoder_hidden_states = prepared_batch["encoder_hidden_states"]
-                        training_logger.debug(
-                            f"Encoder hidden states: {encoder_hidden_states.shape}"
-                        )
-
-                    if "add_text_embeds" in prepared_batch:
-                        add_text_embeds = prepared_batch["add_text_embeds"]
-                        training_logger.debug(
-                            f"Pooled embeds: {add_text_embeds.shape if add_text_embeds is not None else None}"
-                        )
-
-                    # Predict the noise residual and compute loss
-                    is_regularisation_data = prepared_batch.get(
-                        "is_regularisation_data", False
-                    )
-                    if is_regularisation_data and self.config.model_type == "lora":
-                        training_logger.debug("Predicting parent model residual.")
-                        with torch.no_grad():
-                            if self.config.lora_type.lower() == "lycoris":
-                                training_logger.debug(
-                                    "Detaching LyCORIS adapter for parent prediction."
-                                )
-                                self.accelerator._lycoris_wrapped_network.set_multiplier(
-                                    0.0
-                                )
-                            else:
-                                self.model.get_trained_component().disable_lora()
-                            prepared_batch["target"] = self.model_predict(
-                                prepared_batch=prepared_batch,
-                            )["model_prediction"]
-                            if self.config.lora_type.lower() == "lycoris":
-                                training_logger.debug(
-                                    "Attaching LyCORIS adapter for student prediction."
-                                )
-                                self.accelerator._lycoris_wrapped_network.set_multiplier(
-                                    1.0
-                                )
-                            else:
-                                self.model.get_trained_component().enable_lora()
-
-                    training_logger.debug("Predicting noise residual.")
-                    model_pred = self.model_predict(
-                        prepared_batch=prepared_batch,
-                    )
-                    loss = self.model.loss(
-                        prepared_batch=prepared_batch,
-                        model_output=model_pred,
-                        apply_conditioning_mask=True,
-                    )
-                    loss, aux_loss_logs = self.model.auxiliary_loss(
-                        prepared_batch=prepared_batch,
-                        model_output=model_pred,
-                        loss=loss,
-                    )
-
-                    parent_loss = None
-                    if is_regularisation_data:
-                        parent_loss = loss
-
-                    # Gather the losses across all processes for logging (if using distributed training)
-                    avg_loss = self.accelerator.gather(
-                        loss.repeat(self.config.train_batch_size)
-                    ).mean()
-                    self.train_loss += (
-                        avg_loss.item() / self.config.gradient_accumulation_steps
-                    )
-                    # Backpropagate
-                    self.grad_norm = None
-                    if not self.config.disable_accelerator:
-                        training_logger.debug("Backwards pass.")
-                        self.accelerator.backward(loss)
-
-                        if (
-                            self.config.optimizer != "adam_bfloat16"
-                            and self.config.gradient_precision == "fp32"
-                        ):
-                            # After backward, convert gradients to fp32 for stable accumulation
-                            for param in self.params_to_optimize:
-                                if param.grad is not None:
-                                    param.grad.data = param.grad.data.to(torch.float32)
-
-                        self.grad_norm = self._max_grad_value()
-                        if (
-                            self.accelerator.sync_gradients
-                            and self.config.optimizer
-                            not in ["optimi-stableadamw", "prodigy"]
-                            and self.config.max_grad_norm > 0
-                        ):
-                            # StableAdamW/Prodigy do not need clipping, similar to Adafactor.
-                            if self.config.grad_clip_method == "norm":
-                                self.grad_norm = self.accelerator.clip_grad_norm_(
-                                    self._get_trainable_parameters(),
-                                    self.config.max_grad_norm,
-                                )
-                            elif self.config.use_deepspeed_optimizer:
-                                # deepspeed can only do norm clipping (internally)
-                                pass
-                            elif self.config.grad_clip_method == "value":
-                                self.accelerator.clip_grad_value_(
-                                    self._get_trainable_parameters(),
-                                    self.config.max_grad_norm,
-                                )
-                            else:
-                                raise ValueError(
-                                    f"Unknown grad clip method: {self.config.grad_clip_method}. Supported methods: value, norm"
-                                )
-                        training_logger.debug("Stepping components forward.")
-                        if self.config.optimizer_release_gradients:
-                            step_offset = 0  # simpletuner indexes steps from 1.
-                            should_not_release_gradients = (
-                                step + step_offset
-                            ) % self.config.gradient_accumulation_steps != 0
-                            training_logger.debug(
-                                f"step: {step}, should_not_release_gradients: {should_not_release_gradients}, self.config.optimizer_release_gradients: {self.config.optimizer_release_gradients}"
-                            )
-                            self.optimizer.optimizer_accumulation = (
-                                should_not_release_gradients
-                            )
-                        else:
-                            self.optimizer.step()
-                        self.optimizer.zero_grad(
-                            set_to_none=self.config.set_grads_to_none
-                        )
-
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                wandb_logs = {}
-                if self.accelerator.sync_gradients:
-                    try:
-                        if "prodigy" in self.config.optimizer:
-                            self.lr_scheduler.step(**self.extra_lr_scheduler_kwargs)
-                            self.lr = self.optimizer.param_groups[0]["d"]
-                        elif self.config.is_lr_scheduler_disabled:
-                            # hackjob method of retrieving LR from accelerated optims
-                            self.lr = StateTracker.get_last_lr()
-                        else:
-                            self.lr_scheduler.step(**self.extra_lr_scheduler_kwargs)
-                            self.lr = self.lr_scheduler.get_last_lr()[0]
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to get the last learning rate from the scheduler. Error: {e}"
-                        )
-                    wandb_logs.update(
-                        {
-                            "train_loss": self.train_loss,
-                            "optimization_loss": loss,
-                            "learning_rate": self.lr,
-                            "epoch": epoch,
-                        }
-                    )
-                    if parent_loss is not None:
-                        wandb_logs["regularisation_loss"] = parent_loss
-                    if aux_loss_logs is not None:
-                        for key, value in aux_loss_logs.items():
-                            wandb_logs[f"aux_loss/{key}"] = value
-                    if self.grad_norm is not None:
-                        if self.config.grad_clip_method == "norm":
-                            wandb_logs["grad_norm"] = self.grad_norm
-                        else:
-                            wandb_logs["grad_absmax"] = self.grad_norm
-                    if self.validation is not None and hasattr(
-                        self.validation, "evaluation_result"
-                    ):
-                        eval_result = self.validation.get_eval_result()
-                        if eval_result is not None and type(eval_result) == dict:
-                            # add the dict to wandb_logs
-                            self.validation.clear_eval_result()
-                            wandb_logs.update(eval_result)
-
-                    progress_bar.update(1)
-                    self.state["global_step"] += 1
-                    current_epoch_step += 1
-                    StateTracker.set_global_step(self.state["global_step"])
-
-                    ema_decay_value = "None (EMA not in use)"
-                    if self.config.use_ema:
-                        if self.ema_model is not None:
-                            self.ema_model.step(
-                                parameters=self._get_trainable_parameters(),
-                                global_step=self.state["global_step"],
-                            )
-                            wandb_logs["ema_decay_value"] = self.ema_model.get_decay()
-                            ema_decay_value = wandb_logs["ema_decay_value"]
-                        self.accelerator.wait_for_everyone()
-
-                    # Log scatter plot to wandb
-                    if (
-                        self.config.report_to == "wandb"
-                        and self.accelerator.is_main_process
-                    ):
-                        # Prepare the data for the scatter plot
-                        data = [
-                            [iteration, timestep]
-                            for iteration, timestep in self.timesteps_buffer
-                        ]
-                        table = wandb.Table(
-                            data=data, columns=["global_step", "timestep"]
-                        )
-                        wandb_logs["timesteps_scatter"] = wandb.plot.scatter(
-                            table,
-                            "global_step",
-                            "timestep",
-                            title="Timestep distribution by step",
-                        )
-
-                    # Clear buffers
-                    self.timesteps_buffer = []
-
-                    # Average out the luminance values of each batch, so that we can store that in this step.
-                    avg_training_data_luminance = sum(training_luminance_values) / len(
-                        training_luminance_values
-                    )
-                    wandb_logs["train_luminance"] = avg_training_data_luminance
-
-                    logger.debug(
-                        f"Step {self.state['global_step']} of {self.config.max_train_steps}: loss {loss.item()}, lr {self.lr}, epoch {epoch}/{self.config.num_train_epochs}, ema_decay_value {ema_decay_value}, train_loss {self.train_loss}"
-                    )
-                    webhook_pending_msg = f"Step {self.state['global_step']} of {self.config.max_train_steps}: loss {round(loss.item(), 4)}, lr {self.lr}, epoch {epoch}/{self.config.num_train_epochs}, ema_decay_value {ema_decay_value}, train_loss {round(self.train_loss, 4)}"
-
-                    # Reset some values for the next go.
-                    training_luminance_values = []
-                    self.train_loss = 0.0
-
-                    if (
-                        self.config.webhook_reporting_interval is not None
-                        and self.state["global_step"]
-                        % self.config.webhook_reporting_interval
-                        == 0
-                    ):
-                        structured_data = {
-                            "state": self.state,
-                            "loss": round(self.train_loss, 4),
-                            "parent_loss": parent_loss,
-                            "learning_rate": self.lr,
-                            "epoch": epoch,
-                            "final_epoch": self.config.num_train_epochs,
-                        }
-                        self._send_webhook_raw(
-                            structured_data=structured_data, message_type="train"
-                        )
-                    if self.state["global_step"] % self.config.checkpointing_steps == 0:
-                        self._send_webhook_msg(
-                            message=f"Checkpoint: `{webhook_pending_msg}`",
-                            message_level="info",
-                        )
-                        if self.accelerator.is_main_process:
-                            # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                            if self.config.checkpoints_total_limit is not None:
-                                checkpoints = os.listdir(self.config.output_dir)
-                                checkpoints = [
-                                    d for d in checkpoints if d.startswith("checkpoint")
-                                ]
-                                checkpoints = sorted(
-                                    checkpoints, key=lambda x: int(x.split("-")[1])
-                                )
-
-                                # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                                if (
-                                    len(checkpoints)
-                                    >= self.config.checkpoints_total_limit
-                                ):
-                                    num_to_remove = (
-                                        len(checkpoints)
-                                        - self.config.checkpoints_total_limit
-                                        + 1
-                                    )
-                                    removing_checkpoints = checkpoints[0:num_to_remove]
-                                    logger.debug(
-                                        f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                    )
-                                    logger.debug(
-                                        f"removing checkpoints: {', '.join(removing_checkpoints)}"
-                                    )
-
-                                    for removing_checkpoint in removing_checkpoints:
-                                        removing_checkpoint = os.path.join(
-                                            self.config.output_dir, removing_checkpoint
-                                        )
-                                        try:
-                                            shutil.rmtree(
-                                                removing_checkpoint, ignore_errors=True
-                                            )
-                                        except Exception as e:
-                                            logger.error(
-                                                f"Failed to remove directory: {removing_checkpoint}"
-                                            )
-                                            print(e)
-
-                        if (
-                            self.accelerator.is_main_process
-                            or self.config.use_deepspeed_optimizer
-                        ):
-                            save_path = os.path.join(
-                                self.config.output_dir,
-                                f"checkpoint-{self.state['global_step']}",
-                            )
-                            print("\n")
-                            # schedulefree optim needs the optimizer to be in eval mode to save the state (and then back to train after)
-                            self.mark_optimizer_eval()
-                            self.accelerator.save_state(save_path)
-                            self.mark_optimizer_train()
-                            for _, backend in StateTracker.get_data_backends().items():
-                                if "sampler" in backend:
-                                    logger.debug(f"Backend: {backend}")
-                                    backend["sampler"].save_state(
-                                        state_path=os.path.join(
-                                            save_path,
-                                            self.model_hooks.training_state_path,
-                                        ),
-                                    )
-
-                    if (
-                        self.config.accelerator_cache_clear_interval is not None
-                        and self.state["global_step"]
-                        % self.config.accelerator_cache_clear_interval
-                        == 0
-                    ):
-                        reclaim_memory()
-
-                    # here we might run eval loss calculations.
-                    if self.evaluation is not None and self.evaluation.would_evaluate(
-                        self.state
-                    ):
-                        self.mark_optimizer_eval()
-                        all_accumulated_losses = self.evaluation.execute_eval(
-                            prepare_batch=self.prepare_batch,
-                            model_predict=self.model_predict,
-                            calculate_loss=self.model.loss,
-                            get_prediction_target=self.get_prediction_target,
-                            noise_scheduler=self._get_noise_schedule(),
-                        )
-                        if all_accumulated_losses:
-                            tracker_table = self.evaluation.generate_tracker_table(
-                                all_accumulated_losses=all_accumulated_losses
-                            )
-                            logger.debug(f"Tracking information: {tracker_table}")
-                            wandb_logs.update(tracker_table)
-                        self.mark_optimizer_train()
-
-                    self.accelerator.log(
-                        wandb_logs,
-                        step=self.state["global_step"],
-                    )
-
-                logs = {
-                    "step_loss": loss.detach().item(),
-                    "lr": float(self.lr),
-                }
-                if aux_loss_logs is not None:
-                    logs_to_print = {}
-                    for key, value in aux_loss_logs.items():
-                        logs_to_print[f"aux_loss/{key}"] = value
-                    training_logger.debug(f"Aux loss: {logs_to_print}")
-                if self.grad_norm is not None:
-                    if self.config.grad_clip_method == "norm":
-                        logs["grad_norm"] = float(self.grad_norm.clone().detach())
-                    elif self.config.grad_clip_method == "value":
-                        logs["grad_absmax"] = self.grad_norm
-
-                progress_bar.set_postfix(**logs)
-
-                if self.validation is not None:
-                    if self.validation.would_validate():
-                        self.mark_optimizer_eval()
-                        self.enable_sageattention_inference()
-                        self.disable_gradient_checkpointing()
-                    self.validation.run_validations(
-                        validation_type="intermediary", step=step
-                    )
-                    if self.validation.would_validate():
-                        self.disable_sageattention_inference()
-                        self.enable_gradient_checkpointing()
-                        self.mark_optimizer_train()
-                if (
-                    self.config.push_to_hub
-                    and self.config.push_checkpoints_to_hub
-                    and self.state["global_step"] % self.config.checkpointing_steps == 0
-                    and step % self.config.gradient_accumulation_steps == 0
-                    and self.state["global_step"] > self.state["global_resume_step"]
-                ):
                     if self.accelerator.is_main_process:
-                        try:
-                            self.hub_manager.upload_latest_checkpoint(
-                                validation_images=(
-                                    getattr(self.validation, "validation_images")
-                                    if self.validation is not None
-                                    else None
-                                ),
-                                webhook_handler=self.webhook_handler,
+                        progress_bar.set_description(
+                            f"Epoch {self.state['current_epoch']}/{self.config.num_train_epochs}, Steps"
+                        )
+
+                    # If we receive a False from the enumerator, we know we reached the next epoch.
+                    if prepared_batch is False:
+                        logger.debug(f"Reached the end of epoch {epoch}")
+                        break
+
+                    if prepared_batch is None:
+                        import traceback
+
+                        raise ValueError(
+                            f"Received a None batch, which is not a good thing. Traceback: {traceback.format_exc()}"
+                        )
+
+                    # Add the current batch of training data's avg luminance to a list.
+                    if "batch_luminance" in prepared_batch:
+                        training_luminance_values.append(prepared_batch["batch_luminance"])
+
+                    with self.accelerator.accumulate(training_models):
+                        bsz = prepared_batch["latents"].shape[0]
+                        training_logger.debug("Sending latent batch to GPU.")
+
+                        if int(bsz) != int(self.config.train_batch_size):
+                            logger.error(
+                                f"Received {bsz} latents, but expected {self.config.train_batch_size}. Processing short batch."
                             )
+                        training_logger.debug(f"Working on batch size: {bsz}")
+                        # Prepare the data for the scatter plot
+                        for timestep in prepared_batch["timesteps"].tolist():
+                            self.timesteps_buffer.append(
+                                (self.state["global_step"], timestep)
+                            )
+
+                        if "encoder_hidden_states" in prepared_batch:
+                            encoder_hidden_states = prepared_batch["encoder_hidden_states"]
+                            training_logger.debug(
+                                f"Encoder hidden states: {encoder_hidden_states.shape}"
+                            )
+
+                        if "add_text_embeds" in prepared_batch:
+                            add_text_embeds = prepared_batch["add_text_embeds"]
+                            training_logger.debug(
+                                f"Pooled embeds: {add_text_embeds.shape if add_text_embeds is not None else None}"
+                            )
+                        with record_function("forward"):
+                            # Predict the noise residual and compute loss
+                            is_regularisation_data = prepared_batch.get(
+                                "is_regularisation_data", False
+                            )
+                            if is_regularisation_data and self.config.model_type == "lora":
+                                training_logger.debug("Predicting parent model residual.")
+                                with torch.no_grad():
+                                    if self.config.lora_type.lower() == "lycoris":
+                                        training_logger.debug(
+                                            "Detaching LyCORIS adapter for parent prediction."
+                                        )
+                                        self.accelerator._lycoris_wrapped_network.set_multiplier(
+                                            0.0
+                                        )
+                                    else:
+                                        self.model.get_trained_component().disable_lora()
+                                    prepared_batch["target"] = self.model_predict(
+                                        prepared_batch=prepared_batch,
+                                    )["model_prediction"]
+                                    if self.config.lora_type.lower() == "lycoris":
+                                        training_logger.debug(
+                                            "Attaching LyCORIS adapter for student prediction."
+                                        )
+                                        self.accelerator._lycoris_wrapped_network.set_multiplier(
+                                            1.0
+                                        )
+                                    else:
+                                        self.model.get_trained_component().enable_lora()
+                        
+                            training_logger.debug("Predicting noise residual.")
+                            model_pred = self.model_predict(
+                                prepared_batch=prepared_batch,
+                            )
+                            loss = self.model.loss(
+                                prepared_batch=prepared_batch,
+                                model_output=model_pred,
+                                apply_conditioning_mask=True,
+                            )
+                            loss, aux_loss_logs = self.model.auxiliary_loss(
+                                prepared_batch=prepared_batch,
+                                model_output=model_pred,
+                                loss=loss,
+                            )
+
+                            parent_loss = None
+                            if is_regularisation_data:
+                                parent_loss = loss
+
+                            # Gather the losses across all processes for logging (if using distributed training)
+                            avg_loss = self.accelerator.gather(
+                                loss.repeat(self.config.train_batch_size)
+                            ).mean()
+                            self.train_loss += (
+                                avg_loss.item() / self.config.gradient_accumulation_steps
+                            )
+                        with record_function("backward"):
+                            # Backpropagate
+                            self.grad_norm = None
+                            if not self.config.disable_accelerator:
+                                training_logger.debug("Backwards pass.")
+                                self.accelerator.backward(loss)
+
+                                if (
+                                    self.config.optimizer != "adam_bfloat16"
+                                    and self.config.gradient_precision == "fp32"
+                                ):
+                                    # After backward, convert gradients to fp32 for stable accumulation
+                                    for param in self.params_to_optimize:
+                                        if param.grad is not None:
+                                            param.grad.data = param.grad.data.to(torch.float32)
+
+                                self.grad_norm = self._max_grad_value()
+                                if (
+                                    self.accelerator.sync_gradients
+                                    and self.config.optimizer
+                                    not in ["optimi-stableadamw", "prodigy"]
+                                    and self.config.max_grad_norm > 0
+                                ):
+                                    # StableAdamW/Prodigy do not need clipping, similar to Adafactor.
+                                    if self.config.grad_clip_method == "norm":
+                                        self.grad_norm = self.accelerator.clip_grad_norm_(
+                                            self._get_trainable_parameters(),
+                                            self.config.max_grad_norm,
+                                        )
+                                    elif self.config.use_deepspeed_optimizer:
+                                        # deepspeed can only do norm clipping (internally)
+                                        pass
+                                    elif self.config.grad_clip_method == "value":
+                                        self.accelerator.clip_grad_value_(
+                                            self._get_trainable_parameters(),
+                                            self.config.max_grad_norm,
+                                        )
+                                    else:
+                                        raise ValueError(
+                                            f"Unknown grad clip method: {self.config.grad_clip_method}. Supported methods: value, norm"
+                                        )
+                            with record_function("optimizer"): 
+                                training_logger.debug("Stepping components forward.")
+                                if self.config.optimizer_release_gradients:
+                                    step_offset = 0  # simpletuner indexes steps from 1.
+                                    should_not_release_gradients = (
+                                        step + step_offset
+                                    ) % self.config.gradient_accumulation_steps != 0
+                                    training_logger.debug(
+                                        f"step: {step}, should_not_release_gradients: {should_not_release_gradients}, self.config.optimizer_release_gradients: {self.config.optimizer_release_gradients}"
+                                    )
+                                    self.optimizer.optimizer_accumulation = (
+                                        should_not_release_gradients
+                                    )
+                                else:
+                                    self.optimizer.step()
+                                self.optimizer.zero_grad(
+                                    set_to_none=self.config.set_grads_to_none
+                                )
+
+                    # Checks if the accelerator has performed an optimization step behind the scenes
+                    wandb_logs = {}
+                    if self.accelerator.sync_gradients:
+                        try:
+                            if "prodigy" in self.config.optimizer:
+                                self.lr_scheduler.step(**self.extra_lr_scheduler_kwargs)
+                                self.lr = self.optimizer.param_groups[0]["d"]
+                            elif self.config.is_lr_scheduler_disabled:
+                                # hackjob method of retrieving LR from accelerated optims
+                                self.lr = StateTracker.get_last_lr()
+                            else:
+                                self.lr_scheduler.step(**self.extra_lr_scheduler_kwargs)
+                                self.lr = self.lr_scheduler.get_last_lr()[0]
                         except Exception as e:
                             logger.error(
-                                f"Error uploading to hub: {e}, continuing training."
+                                f"Failed to get the last learning rate from the scheduler. Error: {e}"
                             )
-                self.accelerator.wait_for_everyone()
+                        wandb_logs.update(
+                            {
+                                "train_loss": self.train_loss,
+                                "optimization_loss": loss,
+                                "learning_rate": self.lr,
+                                "epoch": epoch,
+                            }
+                        )
+                        if parent_loss is not None:
+                            wandb_logs["regularisation_loss"] = parent_loss
+                        if aux_loss_logs is not None:
+                            for key, value in aux_loss_logs.items():
+                                wandb_logs[f"aux_loss/{key}"] = value
+                        if self.grad_norm is not None:
+                            if self.config.grad_clip_method == "norm":
+                                wandb_logs["grad_norm"] = self.grad_norm
+                            else:
+                                wandb_logs["grad_absmax"] = self.grad_norm
+                        if self.validation is not None and hasattr(
+                            self.validation, "evaluation_result"
+                        ):
+                            eval_result = self.validation.get_eval_result()
+                            if eval_result is not None and type(eval_result) == dict:
+                                # add the dict to wandb_logs
+                                self.validation.clear_eval_result()
+                                wandb_logs.update(eval_result)
 
-                if self.state["global_step"] >= self.config.max_train_steps or (
-                    epoch > self.config.num_train_epochs
-                    and not self.config.ignore_final_epochs
-                ):
-                    logger.info(
-                        f"Training has completed."
-                        f"\n -> global_step = {self.state['global_step']}, max_train_steps = {self.config.max_train_steps}, epoch = {epoch}, num_train_epochs = {self.config.num_train_epochs}",
-                    )
-                    break
+                        progress_bar.update(1)
+                        self.state["global_step"] += 1
+                        current_epoch_step += 1
+                        StateTracker.set_global_step(self.state["global_step"])
+                        # Step the profiler if enabled  
+                        if profiler:  
+                            profiler.step()  
+
+                        ema_decay_value = "None (EMA not in use)"
+                        if self.config.use_ema:
+                            if self.ema_model is not None:
+                                self.ema_model.step(
+                                    parameters=self._get_trainable_parameters(),
+                                    global_step=self.state["global_step"],
+                                )
+                                wandb_logs["ema_decay_value"] = self.ema_model.get_decay()
+                                ema_decay_value = wandb_logs["ema_decay_value"]
+                            self.accelerator.wait_for_everyone()
+
+                        # Log scatter plot to wandb
+                        if (
+                            self.config.report_to == "wandb"
+                            and self.accelerator.is_main_process
+                        ):
+                            # Prepare the data for the scatter plot
+                            data = [
+                                [iteration, timestep]
+                                for iteration, timestep in self.timesteps_buffer
+                            ]
+                            table = wandb.Table(
+                                data=data, columns=["global_step", "timestep"]
+                            )
+                            wandb_logs["timesteps_scatter"] = wandb.plot.scatter(
+                                table,
+                                "global_step",
+                                "timestep",
+                                title="Timestep distribution by step",
+                            )
+
+                        # Clear buffers
+                        self.timesteps_buffer = []
+
+                        # Average out the luminance values of each batch, so that we can store that in this step.
+                        avg_training_data_luminance = sum(training_luminance_values) / len(
+                            training_luminance_values
+                        )
+                        wandb_logs["train_luminance"] = avg_training_data_luminance
+
+                        logger.debug(
+                            f"Step {self.state['global_step']} of {self.config.max_train_steps}: loss {loss.item()}, lr {self.lr}, epoch {epoch}/{self.config.num_train_epochs}, ema_decay_value {ema_decay_value}, train_loss {self.train_loss}"
+                        )
+                        webhook_pending_msg = f"Step {self.state['global_step']} of {self.config.max_train_steps}: loss {round(loss.item(), 4)}, lr {self.lr}, epoch {epoch}/{self.config.num_train_epochs}, ema_decay_value {ema_decay_value}, train_loss {round(self.train_loss, 4)}"
+
+                        # Reset some values for the next go.
+                        training_luminance_values = []
+                        self.train_loss = 0.0
+
+                        if (
+                            self.config.webhook_reporting_interval is not None
+                            and self.state["global_step"]
+                            % self.config.webhook_reporting_interval
+                            == 0
+                        ):
+                            structured_data = {
+                                "state": self.state,
+                                "loss": round(self.train_loss, 4),
+                                "parent_loss": parent_loss,
+                                "learning_rate": self.lr,
+                                "epoch": epoch,
+                                "final_epoch": self.config.num_train_epochs,
+                            }
+                            self._send_webhook_raw(
+                                structured_data=structured_data, message_type="train"
+                            )
+                        if self.state["global_step"] % self.config.checkpointing_steps == 0:
+                            self._send_webhook_msg(
+                                message=f"Checkpoint: `{webhook_pending_msg}`",
+                                message_level="info",
+                            )
+                            if self.accelerator.is_main_process:
+                                # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                                if self.config.checkpoints_total_limit is not None:
+                                    checkpoints = os.listdir(self.config.output_dir)
+                                    checkpoints = [
+                                        d for d in checkpoints if d.startswith("checkpoint")
+                                    ]
+                                    checkpoints = sorted(
+                                        checkpoints, key=lambda x: int(x.split("-")[1])
+                                    )
+
+                                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                                    if (
+                                        len(checkpoints)
+                                        >= self.config.checkpoints_total_limit
+                                    ):
+                                        num_to_remove = (
+                                            len(checkpoints)
+                                            - self.config.checkpoints_total_limit
+                                            + 1
+                                        )
+                                        removing_checkpoints = checkpoints[0:num_to_remove]
+                                        logger.debug(
+                                            f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                                        )
+                                        logger.debug(
+                                            f"removing checkpoints: {', '.join(removing_checkpoints)}"
+                                        )
+
+                                        for removing_checkpoint in removing_checkpoints:
+                                            removing_checkpoint = os.path.join(
+                                                self.config.output_dir, removing_checkpoint
+                                            )
+                                            try:
+                                                shutil.rmtree(
+                                                    removing_checkpoint, ignore_errors=True
+                                                )
+                                            except Exception as e:
+                                                logger.error(
+                                                    f"Failed to remove directory: {removing_checkpoint}"
+                                                )
+                                                print(e)
+
+                            if (
+                                self.accelerator.is_main_process
+                                or self.config.use_deepspeed_optimizer
+                            ):
+                                save_path = os.path.join(
+                                    self.config.output_dir,
+                                    f"checkpoint-{self.state['global_step']}",
+                                )
+                                print("\n")
+                                # schedulefree optim needs the optimizer to be in eval mode to save the state (and then back to train after)
+                                self.mark_optimizer_eval()
+                                self.accelerator.save_state(save_path)
+                                self.mark_optimizer_train()
+                                for _, backend in StateTracker.get_data_backends().items():
+                                    if "sampler" in backend:
+                                        logger.debug(f"Backend: {backend}")
+                                        backend["sampler"].save_state(
+                                            state_path=os.path.join(
+                                                save_path,
+                                                self.model_hooks.training_state_path,
+                                            ),
+                                        )
+
+                        if (
+                            self.config.accelerator_cache_clear_interval is not None
+                            and self.state["global_step"]
+                            % self.config.accelerator_cache_clear_interval
+                            == 0
+                        ):
+                            reclaim_memory()
+
+                        # here we might run eval loss calculations.
+                        if self.evaluation is not None and self.evaluation.would_evaluate(
+                            self.state
+                        ):
+                            self.mark_optimizer_eval()
+                            all_accumulated_losses = self.evaluation.execute_eval(
+                                prepare_batch=self.prepare_batch,
+                                model_predict=self.model_predict,
+                                calculate_loss=self.model.loss,
+                                get_prediction_target=self.get_prediction_target,
+                                noise_scheduler=self._get_noise_schedule(),
+                            )
+                            if all_accumulated_losses:
+                                tracker_table = self.evaluation.generate_tracker_table(
+                                    all_accumulated_losses=all_accumulated_losses
+                                )
+                                logger.debug(f"Tracking information: {tracker_table}")
+                                wandb_logs.update(tracker_table)
+                            self.mark_optimizer_train()
+
+                        self.accelerator.log(
+                            wandb_logs,
+                            step=self.state["global_step"],
+                        )
+
+                    logs = {
+                        "step_loss": loss.detach().item(),
+                        "lr": float(self.lr),
+                    }
+                    if aux_loss_logs is not None:
+                        logs_to_print = {}
+                        for key, value in aux_loss_logs.items():
+                            logs_to_print[f"aux_loss/{key}"] = value
+                        training_logger.debug(f"Aux loss: {logs_to_print}")
+                    if self.grad_norm is not None:
+                        if self.config.grad_clip_method == "norm":
+                            logs["grad_norm"] = float(self.grad_norm.clone().detach())
+                        elif self.config.grad_clip_method == "value":
+                            logs["grad_absmax"] = self.grad_norm
+
+                    progress_bar.set_postfix(**logs)
+
+                    if self.validation is not None:
+                        if self.validation.would_validate():
+                            self.mark_optimizer_eval()
+                            self.enable_sageattention_inference()
+                            self.disable_gradient_checkpointing()
+                        self.validation.run_validations(
+                            validation_type="intermediary", step=step
+                        )
+                        if self.validation.would_validate():
+                            self.disable_sageattention_inference()
+                            self.enable_gradient_checkpointing()
+                            self.mark_optimizer_train()
+                    if (
+                        self.config.push_to_hub
+                        and self.config.push_checkpoints_to_hub
+                        and self.state["global_step"] % self.config.checkpointing_steps == 0
+                        and step % self.config.gradient_accumulation_steps == 0
+                        and self.state["global_step"] > self.state["global_resume_step"]
+                    ):
+                        if self.accelerator.is_main_process:
+                            try:
+                                self.hub_manager.upload_latest_checkpoint(
+                                    validation_images=(
+                                        getattr(self.validation, "validation_images")
+                                        if self.validation is not None
+                                        else None
+                                    ),
+                                    webhook_handler=self.webhook_handler,
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    f"Error uploading to hub: {e}, continuing training."
+                                )
+                    self.accelerator.wait_for_everyone()
+
+                    if self.state["global_step"] >= self.config.max_train_steps or (
+                        epoch > self.config.num_train_epochs
+                        and not self.config.ignore_final_epochs
+                    ):
+                        logger.info(
+                            f"Training has completed."
+                            f"\n -> global_step = {self.state['global_step']}, max_train_steps = {self.config.max_train_steps}, epoch = {epoch}, num_train_epochs = {self.config.num_train_epochs}",
+                        )
+                        break
             if self.state["global_step"] >= self.config.max_train_steps or (
                 epoch > self.config.num_train_epochs
                 and not self.config.ignore_final_epochs
@@ -2420,6 +2486,8 @@ class Trainer:
                     f"Exiting training loop. Beginning model unwind at epoch {epoch}, step {self.state['global_step']}"
                 )
                 break
+        if profiler:  
+            profiler.stop()
 
         # Create the pipeline using the trained modules and save it.
         self.accelerator.wait_for_everyone()

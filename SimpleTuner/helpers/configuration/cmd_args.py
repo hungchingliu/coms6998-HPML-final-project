@@ -2211,6 +2211,50 @@ def get_argument_parser():
             "Clear the cache from VRAM every X steps. This can help prevent memory leaks, but may slow down training."
         ),
     )
+    parser.add_argument(  
+    "--enable_profiler",  
+    action="store_true",  
+    default=False,  
+    help="Enable PyTorch Profiler for performance analysis"  
+    )  
+    parser.add_argument(  
+        "--profiler_schedule_wait",  
+        type=int,  
+        default=1,  
+        help="Number of steps to wait before starting profiler"  
+    )  
+    parser.add_argument(  
+        "--profiler_schedule_warmup",  
+        type=int,  
+        default=1,  
+        help="Number of steps to warmup the profiler"  
+    )  
+    parser.add_argument(  
+        "--profiler_schedule_active",  
+        type=int,  
+        default=3,  
+        help="Number of steps to actively profile"  
+    )  
+    parser.add_argument(  
+        "--profiler_schedule_repeat",  
+        type=int,  
+        default=2,  
+        help="Number of times to repeat the profiling cycle"  
+    )  
+    parser.add_argument(  
+        "--profiler_output_dir",  
+        type=str,  
+        default="profiler_output",  
+        help="Directory to save profiler output"  
+    )  
+    parser.add_argument(  
+        "--profiler_activities",  
+        type=str,  
+        nargs="+",  
+        default=["cpu", "cuda"],  
+        choices=["cpu", "cuda"],  
+        help="Activities to profile (cpu, cuda)"  
+    )
 
     return parser
 
