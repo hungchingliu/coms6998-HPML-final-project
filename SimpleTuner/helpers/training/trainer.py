@@ -1999,6 +1999,9 @@ class Trainer:
                 with record_function("training_step"):
                     self._exit_on_signal()
                     step += 1
+                    # Step the profiler if enabled  
+                    if profiler:  
+                        profiler.step()
                     prepared_batch = self.prepare_batch(iterator_fn(step, *iterator_args))
                     training_logger.debug(f"Iterator: {iterator_fn}")
                     if self.config.lr_scheduler == "cosine_with_restarts":
@@ -2215,9 +2218,6 @@ class Trainer:
                         self.state["global_step"] += 1
                         current_epoch_step += 1
                         StateTracker.set_global_step(self.state["global_step"])
-                        # Step the profiler if enabled  
-                        if profiler:  
-                            profiler.step()  
 
                         ema_decay_value = "None (EMA not in use)"
                         if self.config.use_ema:
