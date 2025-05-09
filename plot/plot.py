@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 # Data
-methods = ['Full Training', 'LoRA Rank-1', 'LoRA Rank-16', 'LoRA Rank-64']
+methods = ['Full Model Fine-Tuning', 'LoRA Rank-1', 'LoRA Rank-16', 'LoRA Rank-64']
 runtime = [2.56, 1.35, 1.89, 1.38]  # in seconds
 memory = [20.26, 3.50, 3.54, 3.68]  # in GB
 
