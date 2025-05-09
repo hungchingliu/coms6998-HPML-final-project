@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt
 
 # Data
-methods = ['Full Model Fine-Tuning', 'LoRA Rank-1', 'LoRA Rank-16', 'LoRA Rank-64']
-runtime = [2.56, 1.35, 1.89, 1.38]  # in seconds
-memory = [20.26, 3.50, 3.54, 3.68]  # in GB
+methods = ['Full Model Fine-Tuning', 'LoRA Rank-64', 'LoRA Rank-16', 'LoRA Rank-1']
+runtime = [2.56, 1.38, 1.89, 1.35]  # in seconds
+memory = [20.26, 3.68, 3.54, 3.50]  # in GB
 
 runtime_colors = ['skyblue', 'navy', 'navy', 'navy']
 memory_colors = ['skyblue', 'navy', 'navy', 'navy']
@@ -29,7 +29,7 @@ plt.ylabel('Memory (GB)')
 plt.xticks(rotation=15)
 for bar in bars:
     height = bar.get_height()
-    plt.text(bar.get_x() + bar.get_width()/2., height + 0.1, f'{height}GB', ha='center', va='bottom')
+    plt.text(bar.get_x() + bar.get_width()/2., height + 0.1, f'{height:.2f}GB', ha='center', va='bottom')
 plt.tight_layout()
 plt.savefig("peak_memory_usage.png")
 plt.show()
