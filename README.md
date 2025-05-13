@@ -75,7 +75,7 @@ cp ./config/config.json.64.example SimpleTuner/config/config.json
 ### B. Wandb Dashboard
 
 Monitor training and evaluation metrics on the Wandb dashboard:  
-[Wandb Dashboard Link](https://wandb.ai/hl3818-columbia-university/lora-training)
+Wandb Dashboard Link(https://wandb.ai/hl3818-columbia-university/lora-training)
 
 ### C. Train vs. Inference
 
@@ -97,6 +97,10 @@ tensorboard --logdir=./profiler_results/
 ### E. Quickstart: Minimum Reproducible Result
 
 Fine-tuned model checkpoints have been uploaded to Hugging Face.
+- LoRA Rank 64: https://huggingface.co/RobinHCL/simpletuner-lora-64
+- LoRA Rank 16: https://huggingface.co/RobinHCL/simpletuner-lora-16
+- LoRA Rank 1: https://huggingface.co/RobinHCL/simpletuner-lora-1
+- LoRA Rank 64(140000 epochs): https://huggingface.co/RobinHCL/simpletuner-lora-64-14000
 
 To perform inference with the LoRA fine-tuned model using the same prompt as in the paper, run the following scripts in the `./inference` directory:
 
