@@ -62,6 +62,7 @@ Download the [WikiArt Sargent dataset](https://drive.google.com/file/d/1capT9kF-
 #### 3. Copy Configuration Files
 
 ```bash
+# at root of the project
 cp ./config/multidatabackend.json.example SimpleTuner/config/multidatabackend.json
 cp ./config/config.json.64.example SimpleTuner/config/config.json
 ```
@@ -69,6 +70,7 @@ cp ./config/config.json.64.example SimpleTuner/config/config.json
 #### 4. Start Training
 
 ```bash
+# in ./SimpleTuner
 ./train.sh
 ```
 
