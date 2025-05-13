@@ -1,66 +1,124 @@
-# coms6998-HPML-final-project: Analyzing and Optimizing the Performance of Fine Tuning Stable Diﬀusion Image Generating model
-- Team Members: Robin Hung-Ching Liu (hl3818)
-## Existed Codebase
-- The code for fine-tuning Stable Diffusion Model is forked from https://github.com/bghira/SimpleTuner
-## Goal/Objective
-1. Understand the underlying mechanism and architecture of the Stable Diﬀusion image
-generation model.
-2. Analyze open-source implementation of fine-tuning Stable Diﬀusion model and eval-
-uate its performance under the Google Cloud environment.
-3. Apply optimization techniques, including quantization,
-LoRA (Low-Rank Adaptation) to accelerate model fine-tuning, inference and improve model performance.
-## Challenges
-1. Skill Gaps: While I have fundamental knowledge in deep learning theory, I lack
-hands-on experience with relevant libraries and frameworks. Bridging this gap may take
-some time.
-2. Solo Work: While working solo gives me flexibility and more learning, it also means
-that I need to handle all aspects of the project, from research to implementation and
-evaluation.
-## Approach and Performance Optimization Techniques
-I plan to explore and experiment the following optimization techniques to enhance
-model performance:
-- quantization
-- LoRA (Low-Rank Adaptation)
-## Implementation details
-Hardware: Google Cloud Platform VM with GPU(NVIDIA L4)
+# HPML Project: Analyzing and Optimizing the Performance of Fine-Tuning Stable Diffusion Image Generative Model
 
-Software: PyTorch, WandB
+## Team Information
+- **Member**:  
+  - Robin Hung-Ching Liu (hl3818)
 
-Existed code:
-- SimpleTuner: https://github.com/bghira/SimpleTuner
-- stablediﬀusion (https://github.com/Stability-AI/stablediﬀusion)
-- stable-diﬀusion-webui (https://github.com/Stability-AI/stablediﬀusion)
-- sd3.5 inference-only (https://github.com/Stability-AI/sd3.5)
-- Fine-tuning dataset: paintings by John Singer Sargent
-(https://drive.google.com/file/d/1capT9kF-zCu2OiNVzm7VG5DQDaAQLl1Q/view?usp=sharing)
-y
+## 1. Problem Statement
 
-## Demo planned
-- Weeks 1: Conduct literature review on Stable Diﬀusion and LoRA to understand 
-their theoretical foundations and implementations.
-- Weeks 2: Set up the development environment, including the necessary software
-(PyTorch, WandB, training pipeline) and hardware (GCP with GPU instances).
-- Weeks 3: Run experiments to analyze the performance of fine-tuning Stable Diﬀusion
-model on GCP using torch.profiler, calculating runtime for diﬀerent stages.
-- Weeks 4-5: Apply performance optimization techniques such as torch.compile, mixed
-precision, quantization, LoRA (Low-Rank Adaptation), and evaluate the improvements
-in model inference speed and quality.
-- Weeks 6: Write a report summarizing findings, optimizations, and potential
-future improvements.
+Fine-tuning large generative models like Stable Diffusion 3 (SD3) usually requires powerful hardware due to the large number of parameters and high memory usage. On cloud platforms such as Google Cloud Platform (GCP), GPU resources are often limited and expensive. For instance, the SD3 Medium model has about 2 billion parameters and causes out-of-memory (OOM) errors when training on a single NVIDIA L4 GPU with 24 GB memory. These hardware limitations make it difficult to fine-tune the model in a typical cloud environment.
 
-### References
-#### Paper
-- SDXL: Improving Latent Diﬀusion Models for High-Resolution Image Synthesis
-(https://doi.org/10.48550/arXiv.2307.01952)
-- Adding Conditional Control to Text-to-Image Diﬀusion Models
-(https://doi.org/10.48550/arXiv.2302.05543)
-#### open-source code:
-- https://github.com/Stability-AI/stablediﬀusion
-- https://github.com/AUTOMATIC1111/stable-diﬀusion-webui
-- https://github.com/Stability-AI/sd3.5 (inference-only)
-- https://github.com/bghira/SimpleTuner/tree/main
-#### Tutorial:
-- https://stabilityai.notion.site/Stable-Diﬀusion-3-Medium-Fine-tuning-Tutorial-17f90d-
-f74bce4c62a295849f0dc8fb7e
-- https://stabilityai.notion.site/Stable-Diﬀusion-3-5-fine-tuning-guide-11a61cdcd1968027a15bdb-
-d7c40be8c6
+The goal of this project is to make fine-tuning the SD3 Medium model feasible on limited hardware resources. We target accessibility on GCP by using optimization methods such as LoRA (Low-Rank Adaptation), mixed precision training with bfloat16 (bf16), and int8 quantization. We analyze their impact on training time, memory usage, and image quality. All experiments are conducted on a GCP instance with a single NVIDIA L4 GPU. Results are evaluated using PyTorch Profiler and qualitative review of generated images.
+
+## 2. Model Description
+
+We use the **Stable Diffusion 3 Medium** model from Stability AI, a diffusion-based text-to-image generation model with approximately 2 billion parameters.
+
+### Optimization Approaches:
+- **LoRA (Low-Rank Adaptation)**: Injects trainable low-rank matrices into selected layers.
+- **Mixed Precision Training (bf16)**: Reduces memory consumption and accelerates training.
+- **Int8 Quantization**: Minimizes memory usage during fine-tuning.
+
+### Dataset:
+We use the WikiArt Sargent dataset for fine-tuning.  
+Dataset Link (https://drive.google.com/file/d/1capT9kF-zCu2OiNVzm7VG5DQDaAQLl1Q/)
+
+![Model Diagram](./figure/models.png)
+
+All configuration files are located under the `./config` directory.
+
+## 3. Summary of Final Results
+
+- LoRA fine-tuning with int8 quantization achieves:
+  - ~50% reduction in training time
+  - ~80% reduction in peak memory usage  
+  Compared to full model fine-tuning.
+
+![Runtime per Epoch](./figure/runtime_per_epoch.png)  
+![Peak Memory Usage](./figure/peak_memory_usage.png)
+
+## 4. Reproducibility Instructions
+
+### A. Requirements
+
+#### 1. Follow the SimpleTuner Installation Guide
+
+```bash
+cd SimpleTuner
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U poetry pip
+poetry install
+poetry run python -m unittest discover tests/  # Verify installation
+```
+
+#### 2. Download the Fine-Tuning Dataset
+
+Download the [WikiArt Sargent dataset](https://drive.google.com/file/d/1capT9kF-zCu2OiNVzm7VG5DQDaAQLl1Q/) and set the paths in:
+
+- `instance_data_dir` in `./config/multidatabackend.json.example`
+- `cache_dir` and `cache_dir_vae` for model cache paths
+
+#### 3. Copy Configuration Files
+
+```bash
+cp ./config/multidatabackend.json.example SimpleTuner/config/multidatabackend.json
+cp ./config/config.json.64.example SimpleTuner/config/config.json
+```
+
+#### 4. Start Training
+
+```bash
+./train.sh
+```
+
+### B. Wandb Dashboard
+
+Monitor training and evaluation metrics on the Wandb dashboard:  
+[Wandb Dashboard Link](https://wandb.ai/hl3818-columbia-university/lora-training)
+
+### C. Train vs. Inference
+
+To train with a different model setting, copy the desired config from `./config` to `SimpleTuner/config`, then run:
+
+```bash
+./train.sh
+```
+
+### D. Evaluation
+
+If trained with PyTorch Profiler enabled, logs will be stored in `SimpleTuner/profiler_results/`.  
+To view the results:
+
+```bash
+tensorboard --logdir=./profiler_results/
+```
+
+### E. Quickstart: Minimum Reproducible Result
+
+Fine-tuned model checkpoints have been uploaded to Hugging Face.
+
+To perform inference with the LoRA fine-tuned model using the same prompt as in the paper, run the following scripts in the `./inference` directory:
+
+```bash
+pip install torch torchvision
+python3 lora_inference.py
+python3 base_inference.py
+# python3 full_model_fine_tune_inference.py
+# Note: This script is unavailable due to OOM errors breaking the model upload pipeline.
+# To run full model inference, re-train the model from scratch and manually save the weights.
+```
+
+## 5. Notes
+
+- Full model fine-tuning is currently not reproducible with an NVIDIA L4 GPU due to OOM errors. Using a GPU with ≥32 GB VRAM should avoid these issues.
+- PyTorch Profiler integration is included in SimpleTuner.  
+  Key commit: [Profiler Commit](https://github.com/hungchingliu/coms6998-HPML-final-project/commit/88d2f45a5c221f592f5bb9dedb5934a03fce691b)  
+  To disable the profiler: [No Profiler Commit](https://github.com/hungchingliu/coms6998-HPML-final-project/commit/aaf4b5b896d010d29cae4e9c9fe0d3f13702ae82)
+  I sometimes encounter errors when using the profiler commit, I'll switch back to No Profiler Commit for keep fine-tuning the model
+
+## References
+### Existing Codebase
+- The code for fine-tuning Stable Diffusion 3 is forked from [SimpleTuner](https://github.com/bghira/SimpleTuner) and located in the `SimpleTuner/` directory.
+### Tutorial:
+- [Stable Diffusion 3 Medium Fine-Tuning Tutorial](https://stabilityai.notion.site/Stable-Diffusion-3-Medium-Fine-tuning-Tutorial-17f90df74bce4c62a295849f0dc8fb7e)

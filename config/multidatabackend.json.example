@@ -1,0 +1,39 @@
+[
+    {
+        "id": "text-embed-cache",
+        "dataset_type": "text_embeds",
+        "default": true,
+        "type": "local",
+        "cache_dir": "/home/robin/HPML/coms6998-HPML-final-project/SimpleTuner/cache/sd3/text",
+        "write_batch_size": 128
+    },
+    {
+        "id": "my-dataset-1024",
+        "type": "local",
+        "instance_data_dir": "/home/robin/HPML/datasets/wikiart_sargent",
+        "crop": false,
+        "resolution_type": "pixel_area",
+        "metadata_backend": "discovery",
+        "caption_strategy": "textfile",
+        "cache_dir_vae": "/home/robin/HPML/coms6998-HPML-final-project/SimpleTuner/cache/sd3/vae/1024",
+        "resolution": 1024,
+        "minimum_image_size": 768,
+        "repeats": 10
+    },
+    {
+        "id": "my-dataset-crop-1024",
+        "type": "local",
+        "instance_data_dir": "/home/robin/HPML/datasets/wikiart_sargent",
+        "crop": true,
+        "crop_aspect": "square",
+        "crop_style": "center",
+        "vae_cache_clear_each_epoch": false,
+        "resolution_type": "pixel_area",
+        "metadata_backend": "discovery",
+        "caption_strategy": "textfile",
+        "cache_dir_vae": "/home/robin/HPML/coms6998-HPML-final-project/SimpleTuner/cache/sd3/vae-crop/1024",
+        "resolution": 1024,
+        "minimum_image_size": 768,
+        "repeats": 10
+    }
+]
